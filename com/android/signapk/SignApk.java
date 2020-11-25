@@ -18,7 +18,6 @@
 
 package com.android.signapk;
 
-import sun.misc.BASE64Encoder;
 import sun.security.pkcs.ContentInfo;
 import sun.security.pkcs.PKCS7;
 import sun.security.pkcs.SignerInfo;
@@ -181,7 +180,6 @@ class SignApk {
             main.putValue("Created-By", "1.0 (Android SignApk)");
         }
 
-        BASE64Encoder base64 = new BASE64Encoder();
         MessageDigest md = MessageDigest.getInstance("SHA1");
         byte[] buffer = new byte[4096];
         int num;
@@ -208,7 +206,7 @@ class SignApk {
                 Attributes attr = null;
                 if (input != null) attr = input.getAttributes(name);
                 attr = attr != null ? new Attributes(attr) : new Attributes();
-                attr.putValue("SHA1-Digest", base64.encode(md.digest()));
+                attr.putValue("SHA1-Digest", Base64.encode(md.digest()));
                 output.getEntries().put(name, attr);
             }
         }
@@ -228,7 +226,6 @@ class SignApk {
                                    long timestamp,
                                    Manifest manifest)
         throws IOException, GeneralSecurityException {
-        BASE64Encoder base64 = new BASE64Encoder();
         MessageDigest md = MessageDigest.getInstance("SHA1");
 
         JarEntry je = new JarEntry(OTACERT_NAME);
@@ -244,7 +241,7 @@ class SignApk {
         input.close();
 
         Attributes attr = new Attributes();
-        attr.putValue("SHA1-Digest", base64.encode(md.digest()));
+        attr.putValue("SHA1-Digest", Base64.encode(md.digest()));
         manifest.getEntries().put(OTACERT_NAME, attr);
     }
 
@@ -295,7 +292,6 @@ class SignApk {
         main.putValue("Signature-Version", "1.0");
         main.putValue("Created-By", "1.0 (Android SignApk)");
 
-        BASE64Encoder base64 = new BASE64Encoder();
         MessageDigest md = MessageDigest.getInstance("SHA1");
         PrintStream print = new PrintStream(
                 new DigestOutputStream(new ByteArrayOutputStream(), md),
@@ -304,7 +300,7 @@ class SignApk {
         // Digest of the entire manifest
         manifest.write(print);
         print.flush();
-        main.putValue("SHA1-Digest-Manifest", base64.encode(md.digest()));
+        main.putValue("SHA1-Digest-Manifest", Base64.encode(md.digest()));
 
         Map<String, Attributes> entries = manifest.getEntries();
         for (Map.Entry<String, Attributes> entry : entries.entrySet()) {
@@ -317,7 +313,7 @@ class SignApk {
             print.flush();
 
             Attributes sfAttr = new Attributes();
-            sfAttr.putValue("SHA1-Digest", base64.encode(md.digest()));
+            sfAttr.putValue("SHA1-Digest", Base64.encode(md.digest()));
             sf.getEntries().put(entry.getKey(), sfAttr);
         }
 
