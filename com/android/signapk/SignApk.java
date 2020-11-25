@@ -425,23 +425,81 @@ class SignApk {
      * more efficient.
      */
     private static void copyFiles(Manifest manifest,
-        JarFile in, JarOutputStream out, long timestamp) throws IOException {
+        JarFile in, JarOutputStream out, long timestamp, int defaultAlignment) throws IOException {
         byte[] buffer = new byte[4096];
         int num;
 
         Map<String, Attributes> entries = manifest.getEntries();
         ArrayList<String> names = new ArrayList<String>(entries.keySet());
         Collections.sort(names);
+
+        boolean firstEntry = true;
+        long offset = 0L;
+
+        // We do the copy in two passes -- first copying all the
+        // entries that are STORED, then copying all the entries that
+        // have any other compression flag (which in practice means
+        // DEFLATED).  This groups all the stored entries together at
+        // the start of the file and makes it easier to do alignment
+        // on them (since only stored entries are aligned).
+
         for (String name : names) {
             JarEntry inEntry = in.getJarEntry(name);
             JarEntry outEntry = null;
-            if (inEntry.getMethod() == JarEntry.STORED) {
-                // Preserve the STORED method of the input entry.
-                outEntry = new JarEntry(inEntry);
-            } else {
-                // Create a new entry so that the compressed len is recomputed.
-                outEntry = new JarEntry(name);
+            if (inEntry.getMethod() != JarEntry.STORED) continue;
+            // Preserve the STORED method of the input entry.
+            outEntry = new JarEntry(inEntry);
+            outEntry.setTime(timestamp);
+            // Discard comment and extra fields of this entry to
+            // simplify alignment logic below and for consistency with
+            // how compressed entries are handled later.
+            outEntry.setComment(null);
+            outEntry.setExtra(null);
+
+            // 'offset' is the offset into the file at which we expect
+            // the file data to begin.  This is the value we need to
+            // make a multiple of 'alignement'.
+            offset += 30 + outEntry.getName().length();
+            if (firstEntry) {
+                // The first entry in a jar file has an extra field of
+                // four bytes that you can't get rid of; any extra
+                // data you specify in the JarEntry is appended to
+                // these forced four bytes.  This is JAR_MAGIC in
+                // JarOutputStream; the bytes are 0xfeca0000.
+                offset += 4;
+                firstEntry = false;
             }
+            // Align .so contents to memory page boundary to enable memory-mapped execution.
+            int alignment = name.endsWith(".so") ? 4096 : defaultAlignment;
+            if (alignment > 0 && (offset % alignment != 0)) {
+                // Set the "extra data" of the entry to between 1 and
+                // alignment-1 bytes, to make the file data begin at
+                // an aligned offset.
+                int needed = alignment - (int)(offset % alignment);
+                outEntry.setExtra(new byte[needed]);
+                offset += needed;
+            }
+
+            out.putNextEntry(outEntry);
+
+            InputStream data = in.getInputStream(inEntry);
+            while ((num = data.read(buffer)) > 0) {
+                out.write(buffer, 0, num);
+                offset += num;
+            }
+            out.flush();
+        }
+
+        // Copy all the non-STORED entries.  We don't attempt to
+        // maintain the 'offset' variable past this point; we don't do
+        // alignment on these entries.
+
+        for (String name : names) {
+            JarEntry inEntry = in.getJarEntry(name);
+            JarEntry outEntry = null;
+            if (inEntry.getMethod() == JarEntry.STORED) continue;
+            // Create a new entry so that the compressed len is recomputed.
+            outEntry = new JarEntry(name);
             outEntry.setTime(timestamp);
             out.putNextEntry(outEntry);
 
@@ -462,9 +520,11 @@ class SignApk {
         }
 
         boolean signWholeFile = false;
+        int alignment = 4;
         int argstart = 0;
         if (args[0].equals("-w")) {
             signWholeFile = true;
+            alignment = 0;
             argstart = 1;
         }
 
@@ -509,7 +569,7 @@ class SignApk {
             Manifest manifest = addDigestsToManifest(inputJar);
 
             // Everything else
-            copyFiles(manifest, inputJar, outputJar, timestamp);
+            copyFiles(manifest, inputJar, outputJar, timestamp, alignment);
 
             // otacert
             if (signWholeFile) {
