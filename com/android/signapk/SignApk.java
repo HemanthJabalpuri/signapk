@@ -30,7 +30,6 @@ import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -43,7 +42,6 @@ import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.Signature;
-import java.security.SignatureException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.InvalidKeySpecException;
@@ -246,46 +244,8 @@ class SignApk {
     }
 
 
-    /** Write to another stream and also feed it to the Signature object. */
-    private static class SignatureOutputStream extends FilterOutputStream {
-        private Signature mSignature;
-        private int mCount;
-
-        public SignatureOutputStream(OutputStream out, Signature sig) {
-            super(out);
-            mSignature = sig;
-            mCount = 0;
-        }
-
-        @Override
-        public void write(int b) throws IOException {
-            try {
-                mSignature.update((byte) b);
-            } catch (SignatureException e) {
-                throw new IOException("SignatureException: " + e);
-            }
-            super.write(b);
-            mCount++;
-        }
-
-        @Override
-        public void write(byte[] b, int off, int len) throws IOException {
-            try {
-                mSignature.update(b, off, len);
-            } catch (SignatureException e) {
-                throw new IOException("SignatureException: " + e);
-            }
-            super.write(b, off, len);
-            mCount += len;
-        }
-
-        public int size() {
-            return mCount;
-        }
-    }
-
     /** Write a .SF file with a digest of the specified manifest. */
-    private static void writeSignatureFile(Manifest manifest, SignatureOutputStream out)
+    private static byte[] writeSignatureFile(Manifest manifest, ByteArrayOutputStream out)
             throws IOException, GeneralSecurityException {
         Manifest sf = new Manifest();
         Attributes main = sf.getMainAttributes();
@@ -327,6 +287,7 @@ class SignApk {
             out.write('\r');
             out.write('\n');
         }
+        return out.toByteArray();
     }
 
     /** Write a .RSA file with a digital signature. */
@@ -588,8 +549,9 @@ class SignApk {
             je = new JarEntry(CERT_SF_NAME);
             je.setTime(timestamp);
             outputJar.putNextEntry(je);
-            writeSignatureFile(manifest,
-                    new SignatureOutputStream(outputJar, signature));
+            byte[] sfBytes = writeSignatureFile(manifest, new ByteArrayOutputStream());
+            outputJar.write(sfBytes);
+            signature.update(sfBytes);
 
             // CERT.RSA
             je = new JarEntry(CERT_RSA_NAME);
