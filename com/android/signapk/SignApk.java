@@ -310,10 +310,74 @@ class SignApk {
         pkcs7.encodeSignedData(out);
     }
 
+    private static class WholeFileSignerOutputStream extends OutputStream {
+        private boolean closing = false;
+        private ByteArrayOutputStream footer = new ByteArrayOutputStream();
+        private OutputStream out;
+        private Signature sig;
+
+        public WholeFileSignerOutputStream(OutputStream out, Signature sig) {
+            this.out = out;
+            this.sig = sig;
+        }
+
+        public void notifyClosing() {
+            closing = true;
+        }
+
+        public void finish() throws IOException {
+            closing = false;
+
+            byte[] data = footer.toByteArray();
+            if (data.length < 2)
+                throw new IOException("Less than two bytes written to footer");
+            write(data, 0, data.length - 2);
+        }
+
+        public byte[] getTail() {
+            return footer.toByteArray();
+        }
+
+        @Override
+        public void write(byte[] b) throws IOException {
+            write(b, 0, b.length);
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            // if the jar is about to close, save the footer that will be written
+            if (closing) {
+                footer.write(b, off, len);
+            } else {
+                try {
+                    sig.update(b, off, len);
+                } catch (GeneralSecurityException e) {
+                    throw new IOException("SignatureException: " + e);
+                }
+                out.write(b, off, len);
+            }
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            // if the jar is about to close, save the footer that will be written
+            if (closing) {
+                footer.write(b);
+            } else {
+                try {
+                    sig.update((byte) b);
+                } catch (GeneralSecurityException e) {
+                    throw new IOException("SignatureException: " + e);
+                }
+                out.write(b);
+            }
+        }
+    }
+
     private static void signWholeOutputFile(byte[] zipData,
                                             OutputStream outputStream,
-                                            X509Certificate publicKey,
-                                            PrivateKey privateKey)
+                                            Signature signature,
+                                            X509Certificate publicKey)
         throws IOException, GeneralSecurityException {
 
         // For a zip with no archive comment, the
@@ -325,10 +389,6 @@ class SignApk {
             zipData[zipData.length-19] != 0x06) {
             throw new IllegalArgumentException("zip data already has an archive comment");
         }
-
-        Signature signature = Signature.getInstance("SHA1withRSA");
-        signature.initSign(privateKey);
-        signature.update(zipData, 0, zipData.length-2);
 
         ByteArrayOutputStream temp = new ByteArrayOutputStream();
 
@@ -373,7 +433,6 @@ class SignApk {
             }
         }
 
-        outputStream.write(zipData, 0, zipData.length-2);
         outputStream.write(total_size & 0xff);
         outputStream.write((total_size >> 8) & 0xff);
         temp.writeTo(outputStream);
@@ -507,13 +566,17 @@ class SignApk {
             PrivateKey privateKey = readPrivateKey(new File(args[argstart+1]));
             inputJar = new JarFile(new File(args[argstart+2]), false);  // Don't verify.
 
-            OutputStream outputStream = null;
+            outputFile = new FileOutputStream(args[argstart+3]);
+            Signature wfsig = null;
+            WholeFileSignerOutputStream wfsos = null;
             if (signWholeFile) {
-                outputStream = new ByteArrayOutputStream();
+                wfsig = Signature.getInstance("SHA1withRSA");
+                wfsig.initSign(privateKey);
+            	wfsos = new WholeFileSignerOutputStream(outputFile, wfsig);
+                outputJar = new JarOutputStream(wfsos);
             } else {
-                outputStream = new FileOutputStream(args[argstart+3]);
+                outputJar = new JarOutputStream(outputFile);
             }
-            outputJar = new JarOutputStream(outputStream);
 
             // For signing .apks, use the maximum compression to make
             // them as small as possible (since they live forever on
@@ -559,14 +622,18 @@ class SignApk {
             outputJar.putNextEntry(je);
             writeSignatureBlock(signature, publicKey, outputJar);
 
-            outputJar.close();
+            if (signWholeFile) {
+                wfsos.notifyClosing();
+                outputJar.close();
+                wfsos.finish();
+            } else {
+                outputJar.close();
+            }
             outputJar = null;
-            outputStream.flush();
+            outputFile.flush();
 
             if (signWholeFile) {
-                outputFile = new FileOutputStream(args[argstart+3]);
-                signWholeOutputFile(((ByteArrayOutputStream)outputStream).toByteArray(),
-                                    outputFile, publicKey, privateKey);
+                signWholeOutputFile(wfsos.getTail(), outputFile, wfsig, publicKey);
             }
         } catch (Exception e) {
             e.printStackTrace();
