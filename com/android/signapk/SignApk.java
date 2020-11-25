@@ -19,7 +19,6 @@
 package com.android.signapk;
 
 import java.io.ByteArrayOutputStream;
-import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -34,24 +33,25 @@ import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Enumeration;
 import java.util.Map;
 import java.util.TimeZone;
 import java.util.TreeMap;
 import java.util.jar.Attributes;
-import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
-import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import java.util.regex.Pattern;
+
+import kellinwood.zipio.ZioEntry;
+import kellinwood.zipio.ZipInput;
+import kellinwood.zipio.ZipOutput;
 
 /**
  * Command line tool to sign JAR files (including APKs and OTA updates) in
  * a way compatible with the mincrypt verifier, using SHA1 and RSA keys.
  */
 class SignApk {
-    private static final String CERT_SF_NAME = "META-INF/TESTKEY.SF";
-    private static final String CERT_RSA_NAME = "META-INF/TESTKEY.RSA";
+    private static final String CERT_SF_NAME = "META-INF/CERT.SF";
+    private static final String CERT_RSA_NAME = "META-INF/CERT.RSA";
 
     private static final String OTACERT_NAME = "META-INF/com/android/otacert";
 
@@ -61,9 +61,15 @@ class SignApk {
                         Pattern.quote(JarFile.MANIFEST_NAME) + ")$");
 
     /** Add the SHA1 of every file to the manifest, creating it if necessary. */
-    private static Manifest addDigestsToManifest(JarFile jar)
+    private static Manifest addDigestsToManifest(ZipInput jar)
             throws IOException, GeneralSecurityException {
-        Manifest input = jar.getManifest();
+        Manifest input = null;
+        Map<String, ZioEntry> entries = jar.getEntries();
+        ZioEntry manifestEntry = entries.get(JarFile.MANIFEST_NAME);
+        if (manifestEntry != null) {
+            input = new Manifest();
+            input.read(manifestEntry.getInputStream());
+        }
         Manifest output = new Manifest();
         Attributes main = output.getMainAttributes();
         if (input != null) {
@@ -81,17 +87,13 @@ class SignApk {
         // output manifest in sorted order.  We expect that the output
         // map will be deterministic.
 
-        TreeMap<String, JarEntry> byName = new TreeMap<String, JarEntry>();
+        TreeMap<String, ZioEntry> byName = new TreeMap<String, ZioEntry>();
+        byName.putAll(entries);
 
-        for (Enumeration<JarEntry> e = jar.entries(); e.hasMoreElements(); ) {
-            JarEntry entry = e.nextElement();
-            byName.put(entry.getName(), entry);
-        }
-
-        for (JarEntry entry: byName.values()) {
+        for (ZioEntry entry: byName.values()) {
             String name = entry.getName();
             if (!entry.isDirectory() && !stripPattern.matcher(name).matches()) {
-                InputStream data = jar.getInputStream(entry);
+                InputStream data = entry.getInputStream();
                 while ((num = data.read(buffer)) > 0) {
                     md.update(buffer, 0, num);
                 }
@@ -114,17 +116,17 @@ class SignApk {
      * cert can be extracted from the CERT.RSA file but this is much
      * easier to get at.)
      */
-    private static void addOtacert(JarOutputStream outputJar,
+    private static void addOtacert(ZipOutput outputJar,
                                    byte[] publicKey,
                                    long timestamp,
                                    Manifest manifest)
         throws IOException, GeneralSecurityException {
         MessageDigest md = MessageDigest.getInstance("SHA1");
 
-        JarEntry je = new JarEntry(OTACERT_NAME);
+        ZioEntry je = new ZioEntry(OTACERT_NAME);
         je.setTime(timestamp);
-        outputJar.putNextEntry(je);
-        outputJar.write(publicKey);
+        je.getOutputStream().write(publicKey);
+        outputJar.write(je);
         md.update(publicKey);
 
         Attributes attr = new Attributes();
@@ -322,89 +324,16 @@ class SignApk {
      * more efficient.
      */
     private static void copyFiles(Manifest manifest,
-        JarFile in, JarOutputStream out, long timestamp, int defaultAlignment) throws IOException {
-        byte[] buffer = new byte[4096];
-        int num;
-
+        ZipInput in, ZipOutput out, long timestamp) throws IOException  {
         Map<String, Attributes> entries = manifest.getEntries();
         ArrayList<String> names = new ArrayList<String>(entries.keySet());
         Collections.sort(names);
-
-        boolean firstEntry = true;
-        long offset = 0L;
-
-        // We do the copy in two passes -- first copying all the
-        // entries that are STORED, then copying all the entries that
-        // have any other compression flag (which in practice means
-        // DEFLATED).  This groups all the stored entries together at
-        // the start of the file and makes it easier to do alignment
-        // on them (since only stored entries are aligned).
-
+        Map<String, ZioEntry> input = in.getEntries();
         for (String name : names) {
-            JarEntry inEntry = in.getJarEntry(name);
-            JarEntry outEntry = null;
-            if (inEntry.getMethod() != JarEntry.STORED) continue;
-            // Preserve the STORED method of the input entry.
-            outEntry = new JarEntry(inEntry);
-            outEntry.setTime(timestamp);
-            // Discard comment and extra fields of this entry to
-            // simplify alignment logic below and for consistency with
-            // how compressed entries are handled later.
-            outEntry.setComment(null);
-            outEntry.setExtra(null);
-
-            // 'offset' is the offset into the file at which we expect
-            // the file data to begin.  This is the value we need to
-            // make a multiple of 'alignement'.
-            offset += 30 + outEntry.getName().length();
-            if (firstEntry) {
-                // The first entry in a jar file has an extra field of
-                // four bytes that you can't get rid of; any extra
-                // data you specify in the JarEntry is appended to
-                // these forced four bytes.  This is JAR_MAGIC in
-                // JarOutputStream; the bytes are 0xfeca0000.
-                offset += 4;
-                firstEntry = false;
-            }
-            // Align .so contents to memory page boundary to enable memory-mapped execution.
-            int alignment = name.endsWith(".so") ? 4096 : defaultAlignment;
-            if (alignment > 0 && (offset % alignment != 0)) {
-                // Set the "extra data" of the entry to between 1 and
-                // alignment-1 bytes, to make the file data begin at
-                // an aligned offset.
-                int needed = alignment - (int)(offset % alignment);
-                outEntry.setExtra(new byte[needed]);
-                offset += needed;
-            }
-
-            out.putNextEntry(outEntry);
-
-            InputStream data = in.getInputStream(inEntry);
-            while ((num = data.read(buffer)) > 0) {
-                out.write(buffer, 0, num);
-                offset += num;
-            }
-            out.flush();
-        }
-
-        // Copy all the non-STORED entries.  We don't attempt to
-        // maintain the 'offset' variable past this point; we don't do
-        // alignment on these entries.
-
-        for (String name : names) {
-            JarEntry inEntry = in.getJarEntry(name);
-            JarEntry outEntry = null;
-            if (inEntry.getMethod() == JarEntry.STORED) continue;
-            // Create a new entry so that the compressed len is recomputed.
-            outEntry = new JarEntry(name);
-            outEntry.setTime(timestamp);
-            out.putNextEntry(outEntry);
-
-            InputStream data = in.getInputStream(inEntry);
-            while ((num = data.read(buffer)) > 0) {
-                out.write(buffer, 0, num);
-            }
-            out.flush();
+            if (name.equals(OTACERT_NAME)) continue;
+            ZioEntry inEntry = input.get(name);
+            inEntry.setTime(timestamp);
+            out.write(inEntry);
         }
     }
 
@@ -425,16 +354,16 @@ class SignApk {
         }
 
         boolean signWholeFile = false;
-        int alignment = 4;
+        boolean align = true;
         int argstart = 0;
         if (args[0].equals("-w")) {
             signWholeFile = true;
-            alignment = 0;
+            align = false;
             argstart = 1;
         }
 
-        JarFile inputJar = null;
-        JarOutputStream outputJar = null;
+        ZipInput inputJar = null;
+        ZipOutput outputJar = null;
         FileOutputStream outputFile = null;
 
         try {
@@ -449,7 +378,7 @@ class SignApk {
             byte[] pk8bytes = toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.pk8"));
             KeyFactory kf = KeyFactory.getInstance("RSA");
             PrivateKey privateKey = kf.generatePrivate(new PKCS8EncodedKeySpec(pk8bytes));
-            inputJar = new JarFile(new File(args[argstart+0]), false);  // Don't verify.
+            inputJar = ZipInput.read(args[argstart+0], align);
 
             outputFile = new FileOutputStream(args[argstart+1]);
             Signature wfsig = null;
@@ -458,27 +387,14 @@ class SignApk {
                 wfsig = Signature.getInstance("SHA1withRSA");
                 wfsig.initSign(privateKey);
             	wfsos = new WholeFileSignerOutputStream(outputFile, wfsig);
-                outputJar = new JarOutputStream(wfsos);
+                outputJar = new ZipOutput(wfsos);
             } else {
-                outputJar = new JarOutputStream(outputFile);
+                outputJar = new ZipOutput(outputFile);
             }
 
-            // For signing .apks, use the maximum compression to make
-            // them as small as possible (since they live forever on
-            // the system partition).  For OTA packages, use the
-            // default compression level, which is much much faster
-            // and produces output that is only a tiny bit larger
-            // (~0.1% on full OTA packages I tested).
-            if (!signWholeFile) {
-                outputJar.setLevel(9);
-            }
-
-            JarEntry je;
+            ZioEntry je;
 
             Manifest manifest = addDigestsToManifest(inputJar);
-
-            // Everything else
-            copyFiles(manifest, inputJar, outputJar, timestamp, alignment);
 
             // otacert
             if (signWholeFile) {
@@ -486,27 +402,30 @@ class SignApk {
             }
 
             // MANIFEST.MF
-            je = new JarEntry(JarFile.MANIFEST_NAME);
+            je = new ZioEntry(JarFile.MANIFEST_NAME);
             je.setTime(timestamp);
-            outputJar.putNextEntry(je);
-            manifest.write(outputJar);
+            manifest.write(je.getOutputStream());
+            outputJar.write(je);
 
             // CERT.SF
             Signature signature = Signature.getInstance("SHA1withRSA");
             signature.initSign(privateKey);
-            je = new JarEntry(CERT_SF_NAME);
+            je = new ZioEntry(CERT_SF_NAME);
             je.setTime(timestamp);
-            outputJar.putNextEntry(je);
             byte[] sfBytes = writeSignatureFile(manifest, new ByteArrayOutputStream());
-            outputJar.write(sfBytes);
+            je.getOutputStream().write(sfBytes);
+            outputJar.write(je);
             signature.update(sfBytes);
 
             // CERT.RSA
-            je = new JarEntry(CERT_RSA_NAME);
+            je = new ZioEntry(CERT_RSA_NAME);
             je.setTime(timestamp);
-            outputJar.putNextEntry(je);
             byte[] sbtbytes = toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.sbt"));
-            writeSignatureBlock(signature, sbtbytes, outputJar);
+            writeSignatureBlock(signature, sbtbytes, je.getOutputStream());
+            outputJar.write(je);
+
+            // Everything else
+            copyFiles(manifest, inputJar, outputJar, timestamp);
 
             if (signWholeFile) {
                 wfsos.notifyClosing();
