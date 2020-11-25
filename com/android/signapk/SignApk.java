@@ -54,6 +54,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.TreeMap;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
@@ -479,8 +480,12 @@ class SignApk {
             File publicKeyFile = new File(args[argstart+0]);
             X509Certificate publicKey = readPublicKey(publicKeyFile);
 
-            // Assume the certificate is valid for at least an hour.
-            long timestamp = publicKey.getNotBefore().getTime() + 3600L * 1000;
+            // Set all ZIP file timestamps to Jan 1 2009 00:00:00.
+            long timestamp = 1230768000000L;
+            // The Java ZipEntry API we're using converts milliseconds since epoch into MS-DOS
+            // timestamp using the current timezone. We thus adjust the milliseconds since epoch
+            // value to end up with MS-DOS timestamp of Jan 1 2009 00:00:00.
+            timestamp -= TimeZone.getDefault().getOffset(timestamp);
 
             PrivateKey privateKey = readPrivateKey(new File(args[argstart+1]));
             inputJar = new JarFile(new File(args[argstart+2]), false);  // Don't verify.
