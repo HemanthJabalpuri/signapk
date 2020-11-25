@@ -1,4 +1,6 @@
 /*
+ * Taken from https://android.googlesource.com/platform/build/+/e691373514d47ecf29ce13e14e9f3b867d394693/tools/signapk/
+ *
  * Copyright (C) 2008 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,7 +37,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
-import java.security.AlgorithmParameters;
 import java.security.DigestOutputStream;
 import java.security.GeneralSecurityException;
 import java.security.Key;
@@ -44,7 +45,6 @@ import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.SignatureException;
-import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.InvalidKeySpecException;
@@ -52,9 +52,7 @@ import java.security.spec.KeySpec;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Date;
 import java.util.Enumeration;
-import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.jar.Attributes;
@@ -80,7 +78,8 @@ class SignApk {
 
     // Files matching this pattern are not copied to the output.
     private static Pattern stripPattern =
-            Pattern.compile("^META-INF/(.*)[.](SF|RSA|DSA)$");
+        Pattern.compile("^(META-INF/((.*)[.](SF|RSA|DSA|EC)|com/android/otacert))|(" +
+                        Pattern.quote(JarFile.MANIFEST_NAME) + ")$");
 
     private static X509Certificate readPublicKey(File file)
             throws IOException, GeneralSecurityException {
@@ -111,7 +110,7 @@ class SignApk {
     }
 
     /**
-     * Decrypt an encrypted PKCS 8 format private key.
+     * Decrypt an encrypted PKCS#8 format private key.
      *
      * Based on ghstark's post on Aug 6, 2006 at
      * http://forums.sun.com/thread.jspa?threadID=758133&messageID=4330949
@@ -145,7 +144,7 @@ class SignApk {
         }
     }
 
-    /** Read a PKCS 8 format private key. */
+    /** Read a PKCS#8 format private key. */
     private static PrivateKey readPrivateKey(File file)
             throws IOException, GeneralSecurityException {
         DataInputStream input = new DataInputStream(new FileInputStream(file));
@@ -199,11 +198,7 @@ class SignApk {
 
         for (JarEntry entry: byName.values()) {
             String name = entry.getName();
-            if (!entry.isDirectory() && !name.equals(JarFile.MANIFEST_NAME) &&
-                !name.equals(CERT_SF_NAME) && !name.equals(CERT_RSA_NAME) &&
-                !name.equals(OTACERT_NAME) &&
-                (stripPattern == null ||
-                 !stripPattern.matcher(name).matches())) {
+            if (!entry.isDirectory() && !stripPattern.matcher(name).matches()) {
                 InputStream data = jar.getInputStream(entry);
                 while ((num = data.read(buffer)) > 0) {
                     md.update(buffer, 0, num);
@@ -399,7 +394,7 @@ class SignApk {
         // bytes [-6:-2] of the file are the little-endian offset from
         // the start of the file to the central directory.  So for the
         // two high bytes to be 0xff 0xff, the archive would have to
-        // be nearly 4GB in side.  So it's unlikely that a real
+        // be nearly 4GB in size.  So it's unlikely that a real
         // commentless archive would have 0xffs here, and lets us tell
         // an old signed archive from a new one.
         temp.write(0xff);
@@ -438,7 +433,7 @@ class SignApk {
         int num;
 
         Map<String, Attributes> entries = manifest.getEntries();
-        List<String> names = new ArrayList(entries.keySet());
+        ArrayList<String> names = new ArrayList<String>(entries.keySet());
         Collections.sort(names);
         for (String name : names) {
             JarEntry inEntry = in.getJarEntry(name);
@@ -494,7 +489,7 @@ class SignApk {
             if (signWholeFile) {
                 outputStream = new ByteArrayOutputStream();
             } else {
-                outputStream = outputFile = new FileOutputStream(args[argstart+3]);
+                outputStream = new FileOutputStream(args[argstart+3]);
             }
             outputJar = new JarOutputStream(outputStream);
 
