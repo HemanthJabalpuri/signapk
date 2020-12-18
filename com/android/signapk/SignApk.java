@@ -55,6 +55,8 @@ class SignApk {
 
     private static final String OTACERT_NAME = "META-INF/com/android/otacert";
 
+    private static boolean verbose = false;
+
     // Files matching this pattern are not copied to the output.
     private static Pattern stripPattern =
         Pattern.compile("^(META-INF/((.*)[.](SF|RSA|DSA|EC)|com/android/otacert))|(" +
@@ -330,6 +332,7 @@ class SignApk {
         Collections.sort(names);
         Map<String, ZioEntry> input = in.getEntries();
         for (String name : names) {
+            if (verbose) System.out.println(name);
             if (name.equals(OTACERT_NAME)) continue;
             ZioEntry inEntry = input.get(name);
             inEntry.setTime(timestamp);
@@ -347,8 +350,8 @@ class SignApk {
     }
 
     public static void main(String[] args) {
-        if (args.length != 2 && args.length != 3) {
-            System.err.println("Usage: signapk [-w] " +
+        if (args.length != 2 && args.length != 3 && args.length != 4) {
+            System.err.println("Usage: signapk [-v] [-w] " +
                     "input.jar output.jar");
             System.exit(2);
         }
@@ -356,10 +359,21 @@ class SignApk {
         boolean signWholeFile = false;
         boolean align = true;
         int argstart = 0;
-        if (args[0].equals("-w")) {
+        if (args[0].equals("-w") || args[1].equals("-w")) {
             signWholeFile = true;
             align = false;
             argstart = 1;
+        }
+        if (args[0].equals("-v") || args[1].equals("-v")) {
+            verbose = true;
+            argstart = 1;
+        }
+        if (signWholeFile && verbose) {
+            argstart = 2;
+        }
+        if (verbose) {
+            System.out.println("Starting Signer file : [ " + args[argstart+2] + " ] ...");
+            System.out.println("Please wait a minute ...");
         }
 
         ZipInput inputJar = null;
@@ -384,6 +398,7 @@ class SignApk {
             Signature wfsig = null;
             WholeFileSignerOutputStream wfsos = null;
             if (signWholeFile) {
+                if (verbose) System.out.println(" Signing Whole File");
                 wfsig = Signature.getInstance("SHA1withRSA");
                 wfsig.initSign(privateKey);
             	wfsos = new WholeFileSignerOutputStream(outputFile, wfsig);
