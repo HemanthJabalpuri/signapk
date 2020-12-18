@@ -18,18 +18,34 @@
 
 package com.android.signapk;
 
+import sun.security.pkcs.ContentInfo;
+import sun.security.pkcs.PKCS7;
+import sun.security.pkcs.SignerInfo;
+import sun.security.x509.AlgorithmId;
+import sun.security.x509.X500Name;
+
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.security.DigestOutputStream;
 import java.security.GeneralSecurityException;
+import java.security.Key;
 import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.Signature;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.KeySpec;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,6 +56,10 @@ import java.util.jar.Attributes;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
 import java.util.regex.Pattern;
+import javax.crypto.Cipher;
+import javax.crypto.EncryptedPrivateKeyInfo;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
 
 import kellinwood.zipio.ZioEntry;
 import kellinwood.zipio.ZipInput;
@@ -59,6 +79,92 @@ class SignApk {
     private static Pattern stripPattern =
         Pattern.compile("^(META-INF/((.*)[.](SF|RSA|DSA|EC)|com/android/otacert))|(" +
                         Pattern.quote(JarFile.MANIFEST_NAME) + ")$");
+
+    private static X509Certificate readPublicKey(File file)
+            throws IOException, GeneralSecurityException {
+        FileInputStream input = new FileInputStream(file);
+        try {
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            return (X509Certificate) cf.generateCertificate(input);
+        } finally {
+            input.close();
+        }
+    }
+
+    /**
+     * Reads the password from stdin and returns it as a string.
+     *
+     * @param keyFile The file containing the private key.  Used to prompt the user.
+     */
+    private static String readPassword(File keyFile) {
+        // TODO: use Console.readPassword() when it's available.
+        System.out.print("Enter password for " + keyFile + " (password will not be hidden): ");
+        System.out.flush();
+        BufferedReader stdin = new BufferedReader(new InputStreamReader(System.in));
+        try {
+            return stdin.readLine();
+        } catch (IOException ex) {
+            return null;
+        }
+    }
+
+    /**
+     * Decrypt an encrypted PKCS#8 format private key.
+     *
+     * Based on ghstark's post on Aug 6, 2006 at
+     * http://forums.sun.com/thread.jspa?threadID=758133&messageID=4330949
+     *
+     * @param encryptedPrivateKey The raw data of the private key
+     * @param keyFile The file containing the private key
+     */
+    private static KeySpec decryptPrivateKey(byte[] encryptedPrivateKey, File keyFile)
+            throws GeneralSecurityException {
+        EncryptedPrivateKeyInfo epkInfo;
+        try {
+            epkInfo = new EncryptedPrivateKeyInfo(encryptedPrivateKey);
+        } catch (IOException ex) {
+            // Probably not an encrypted key.
+            return null;
+        }
+
+        char[] password = readPassword(keyFile).toCharArray();
+
+        SecretKeyFactory skFactory = SecretKeyFactory.getInstance(epkInfo.getAlgName());
+        Key key = skFactory.generateSecret(new PBEKeySpec(password));
+
+        Cipher cipher = Cipher.getInstance(epkInfo.getAlgName());
+        cipher.init(Cipher.DECRYPT_MODE, key, epkInfo.getAlgParameters());
+
+        try {
+            return epkInfo.getKeySpec(cipher);
+        } catch (InvalidKeySpecException ex) {
+            System.err.println("signapk: Password for " + keyFile + " may be bad.");
+            throw ex;
+        }
+    }
+
+    /** Read a PKCS#8 format private key. */
+    private static PrivateKey readPrivateKey(File file)
+            throws IOException, GeneralSecurityException {
+        DataInputStream input = new DataInputStream(new FileInputStream(file));
+        try {
+            byte[] bytes = new byte[(int) file.length()];
+            input.read(bytes);
+
+            KeySpec spec = decryptPrivateKey(bytes, file);
+            if (spec == null) {
+                spec = new PKCS8EncodedKeySpec(bytes);
+            }
+
+            try {
+                return KeyFactory.getInstance("RSA").generatePrivate(spec);
+            } catch (InvalidKeySpecException ex) {
+                return KeyFactory.getInstance("DSA").generatePrivate(spec);
+            }
+        } finally {
+            input.close();
+        }
+    }
 
     /** Add the SHA1 of every file to the manifest, creating it if necessary. */
     private static Manifest addDigestsToManifest(ZipInput jar)
@@ -117,7 +223,7 @@ class SignApk {
      * easier to get at.)
      */
     private static void addOtacert(ZipOutput outputJar,
-                                   byte[] publicKey,
+                                   File publicKeyFile,
                                    long timestamp,
                                    Manifest manifest)
         throws IOException, GeneralSecurityException {
@@ -125,9 +231,15 @@ class SignApk {
 
         ZioEntry je = new ZioEntry(OTACERT_NAME);
         je.setTime(timestamp);
-        je.getOutputStream().write(publicKey);
+        FileInputStream input = new FileInputStream(publicKeyFile);
+        byte[] b = new byte[4096];
+        int read;
+        while ((read = input.read(b)) != -1) {
+            je.getOutputStream().write(b, 0, read);
+            md.update(b, 0, read);
+        }
+        input.close();
         outputJar.write(je);
-        md.update(publicKey);
 
         Attributes attr = new Attributes();
         attr.putValue("SHA1-Digest", Base64.encode(md.digest()));
@@ -183,10 +295,22 @@ class SignApk {
 
     /** Write a .RSA file with a digital signature. */
     private static void writeSignatureBlock(
-            Signature signature, byte[] sbt, OutputStream out)
+            Signature signature, X509Certificate publicKey, OutputStream out)
             throws IOException, GeneralSecurityException {
-        out.write(sbt);
-        out.write(signature.sign());
+        SignerInfo signerInfo = new SignerInfo(
+                new X500Name(publicKey.getIssuerX500Principal().getName()),
+                publicKey.getSerialNumber(),
+                AlgorithmId.get("SHA1"),
+                AlgorithmId.get("RSA"),
+                signature.sign());
+
+        PKCS7 pkcs7 = new PKCS7(
+                new AlgorithmId[] { AlgorithmId.get("SHA1") },
+                new ContentInfo(ContentInfo.DATA_OID, null),
+                new X509Certificate[] { publicKey },
+                new SignerInfo[] { signerInfo });
+
+        pkcs7.encodeSignedData(out);
     }
 
     private static class WholeFileSignerOutputStream extends OutputStream {
@@ -256,7 +380,7 @@ class SignApk {
     private static void signWholeOutputFile(byte[] zipData,
                                             OutputStream outputStream,
                                             Signature signature,
-                                            byte[] sbtbytes)
+                                            X509Certificate publicKey)
         throws IOException, GeneralSecurityException {
 
         // For a zip with no archive comment, the
@@ -278,7 +402,7 @@ class SignApk {
         byte[] message = "signed by SignApk".getBytes("UTF-8");
         temp.write(message);
         temp.write(0);
-        writeSignatureBlock(signature, sbtbytes, temp);
+        writeSignatureBlock(signature, publicKey, temp);
         int total_size = temp.size() + 6;
         if (total_size > 0xffff) {
             throw new IllegalArgumentException("signature is too big for ZIP file comment");
@@ -337,18 +461,10 @@ class SignApk {
         }
     }
 
-    private static byte[] toByteArray(InputStream in) throws IOException {
-        ByteArrayOutputStream result = new ByteArrayOutputStream();
-        byte[] buf = new byte[4096];
-        int chunkSize;
-        while ((chunkSize = in.read(buf)) != -1)
-            result.write(buf, 0, chunkSize);
-        return result.toByteArray();
-    }
-
     public static void main(String[] args) {
-        if (args.length != 2 && args.length != 3) {
+        if (args.length != 4 && args.length != 5) {
             System.err.println("Usage: signapk [-w] " +
+                    "publickey.x509[.pem] privatekey.pk8 " +
                     "input.jar output.jar");
             System.exit(2);
         }
@@ -367,6 +483,8 @@ class SignApk {
         FileOutputStream outputFile = null;
 
         try {
+            File publicKeyFile = new File(args[argstart+0]);
+            X509Certificate publicKey = readPublicKey(publicKeyFile);
 
             // Set all ZIP file timestamps to Jan 1 2009 00:00:00.
             long timestamp = 1230768000000L;
@@ -375,12 +493,10 @@ class SignApk {
             // value to end up with MS-DOS timestamp of Jan 1 2009 00:00:00.
             timestamp -= TimeZone.getDefault().getOffset(timestamp);
 
-            byte[] pk8bytes = toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.pk8"));
-            KeyFactory kf = KeyFactory.getInstance("RSA");
-            PrivateKey privateKey = kf.generatePrivate(new PKCS8EncodedKeySpec(pk8bytes));
-            inputJar = ZipInput.read(args[argstart+0], align);
+            PrivateKey privateKey = readPrivateKey(new File(args[argstart+1]));
+            inputJar = ZipInput.read(args[argstart+2], align);
 
-            outputFile = new FileOutputStream(args[argstart+1]);
+            outputFile = new FileOutputStream(args[argstart+3]);
             Signature wfsig = null;
             WholeFileSignerOutputStream wfsos = null;
             if (signWholeFile) {
@@ -398,7 +514,7 @@ class SignApk {
 
             // otacert
             if (signWholeFile) {
-                addOtacert(outputJar, toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.x509.pem")), timestamp, manifest);
+                addOtacert(outputJar, publicKeyFile, timestamp, manifest);
             }
 
             // MANIFEST.MF
@@ -420,8 +536,7 @@ class SignApk {
             // CERT.RSA
             je = new ZioEntry(CERT_RSA_NAME);
             je.setTime(timestamp);
-            byte[] sbtbytes = toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.sbt"));
-            writeSignatureBlock(signature, sbtbytes, je.getOutputStream());
+            writeSignatureBlock(signature, publicKey, je.getOutputStream());
             outputJar.write(je);
 
             // Everything else
@@ -438,7 +553,7 @@ class SignApk {
             outputFile.flush();
 
             if (signWholeFile) {
-                signWholeOutputFile(wfsos.getTail(), outputFile, wfsig, sbtbytes);
+                signWholeOutputFile(wfsos.getTail(), outputFile, wfsig, publicKey);
             }
         } catch (Exception e) {
             e.printStackTrace();
