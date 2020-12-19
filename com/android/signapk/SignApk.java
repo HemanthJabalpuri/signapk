@@ -357,10 +357,12 @@ class SignApk {
         }
 
         boolean signWholeFile = false;
+        String signingKey = "platform";
         boolean align = true;
         int argstart = 0;
         if (args[0].equals("-w") || args[1].equals("-w")) {
             signWholeFile = true;
+            signingKey = "testkey";
             align = false;
             argstart = 1;
         }
@@ -389,7 +391,7 @@ class SignApk {
             // value to end up with MS-DOS timestamp of Jan 1 2009 00:00:00.
             timestamp -= TimeZone.getDefault().getOffset(timestamp);
 
-            byte[] pk8bytes = toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.pk8"));
+            byte[] pk8bytes = toByteArray(SignApk.class.getResourceAsStream("/keys/" + signingKey + ".pk8"));
             KeyFactory kf = KeyFactory.getInstance("RSA");
             PrivateKey privateKey = kf.generatePrivate(new PKCS8EncodedKeySpec(pk8bytes));
             inputJar = ZipInput.read(args[argstart+0], align);
@@ -435,7 +437,7 @@ class SignApk {
             // CERT.RSA
             je = new ZioEntry(CERT_RSA_NAME);
             je.setTime(timestamp);
-            byte[] sbtbytes = toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.sbt"));
+            byte[] sbtbytes = toByteArray(SignApk.class.getResourceAsStream("/keys/" + signingKey + ".sbt"));
             writeSignatureBlock(signature, sbtbytes, je.getOutputStream());
             outputJar.write(je);
 
