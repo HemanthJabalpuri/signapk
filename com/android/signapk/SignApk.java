@@ -120,20 +120,12 @@ class SignApk {
      */
     private static void addOtacert(ZipOutput outputJar,
                                    byte[] publicKey,
-                                   long timestamp,
-                                   Manifest manifest)
+                                   long timestamp)
         throws IOException, GeneralSecurityException {
-        MessageDigest md = MessageDigest.getInstance("SHA1");
-
         ZioEntry je = new ZioEntry(OTACERT_NAME);
         je.setTime(timestamp);
         je.getOutputStream().write(publicKey);
         outputJar.write(je);
-        md.update(publicKey);
-
-        Attributes attr = new Attributes();
-        attr.putValue("SHA1-Digest", Base64.encode(md.digest()));
-        manifest.getEntries().put(OTACERT_NAME, attr);
     }
 
 
@@ -325,10 +317,22 @@ class SignApk {
      * reduce variation in the output file and make incremental OTAs
      * more efficient.
      */
-    private static void copyFiles(Manifest manifest,
-        ZipInput in, ZipOutput out, long timestamp) throws IOException  {
-        Map<String, Attributes> entries = manifest.getEntries();
-        ArrayList<String> names = new ArrayList<String>(entries.keySet());
+    private static void copyFiles(ZipInput in, ZipOutput out, long timestamp)
+            throws IOException  {
+        Map<String, ZioEntry> e = in.getEntries();
+        ArrayList<String> names = new ArrayList<String>();
+        for (Map.Entry<String, ZioEntry> entrySet : e.entrySet()) {
+            ZioEntry entry = entrySet.getValue();
+            if (entry.isDirectory()) {
+                continue;
+            }
+            String entryName = entry.getName();
+            if (stripPattern.matcher(entryName).matches()) {
+                continue;
+            }
+            names.add(entryName);
+        }
+
         Collections.sort(names);
         Map<String, ZioEntry> input = in.getEntries();
         for (String name : names) {
@@ -397,26 +401,30 @@ class SignApk {
             inputJar = ZipInput.read(args[argstart+0], align);
 
             outputFile = new FileOutputStream(args[argstart+1]);
-            Signature wfsig = null;
-            WholeFileSignerOutputStream wfsos = null;
             if (signWholeFile) {
                 if (verbose) System.out.println(" Signing Whole File");
-                wfsig = Signature.getInstance("SHA1withRSA");
+                Signature wfsig = Signature.getInstance("SHA1withRSA");
                 wfsig.initSign(privateKey);
-            	wfsos = new WholeFileSignerOutputStream(outputFile, wfsig);
+            	WholeFileSignerOutputStream wfsos = new WholeFileSignerOutputStream(outputFile, wfsig);
                 outputJar = new ZipOutput(wfsos);
-            } else {
-                outputJar = new ZipOutput(outputFile);
-            }
+
+                addOtacert(outputJar, toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.x509.pem")), timestamp);
+                copyFiles(inputJar, outputJar, timestamp);
+
+                wfsos.notifyClosing();
+                outputJar.close();
+                wfsos.finish();
+                outputJar = null;
+                outputFile.flush();
+
+                signWholeOutputFile(wfsos.getTail(), outputFile, wfsig, toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.sbt")));
+                System.exit(0);
+            } 
+            outputJar = new ZipOutput(outputFile);
 
             ZioEntry je;
 
             Manifest manifest = addDigestsToManifest(inputJar);
-
-            // otacert
-            if (signWholeFile) {
-                addOtacert(outputJar, toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.x509.pem")), timestamp, manifest);
-            }
 
             // MANIFEST.MF
             je = new ZioEntry(JarFile.MANIFEST_NAME);
@@ -437,26 +445,16 @@ class SignApk {
             // CERT.RSA
             je = new ZioEntry(CERT_RSA_NAME);
             je.setTime(timestamp);
-            byte[] sbtbytes = toByteArray(SignApk.class.getResourceAsStream("/keys/" + signingKey + ".sbt"));
+            byte[] sbtbytes = toByteArray(SignApk.class.getResourceAsStream("/keys/platform.sbt"));
             writeSignatureBlock(signature, sbtbytes, je.getOutputStream());
             outputJar.write(je);
 
             // Everything else
-            copyFiles(manifest, inputJar, outputJar, timestamp);
+            copyFiles(inputJar, outputJar, timestamp);
 
-            if (signWholeFile) {
-                wfsos.notifyClosing();
-                outputJar.close();
-                wfsos.finish();
-            } else {
-                outputJar.close();
-            }
+            outputJar.close();
             outputJar = null;
             outputFile.flush();
-
-            if (signWholeFile) {
-                signWholeOutputFile(wfsos.getTail(), outputFile, wfsig, sbtbytes);
-            }
         } catch (Exception e) {
             e.printStackTrace();
             System.exit(1);
