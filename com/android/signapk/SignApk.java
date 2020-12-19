@@ -321,15 +321,10 @@ class SignApk {
             throws IOException  {
         Map<String, ZioEntry> e = in.getEntries();
         ArrayList<String> names = new ArrayList<String>();
-        for (Map.Entry<String, ZioEntry> entrySet : e.entrySet()) {
-            ZioEntry entry = entrySet.getValue();
-            if (entry.isDirectory()) {
-                continue;
-            }
+        for (ZioEntry entry : e.values()) {
+            if (entry.isDirectory()) continue;
             String entryName = entry.getName();
-            if (stripPattern.matcher(entryName).matches()) {
-                continue;
-            }
+            if (stripPattern.matcher(entryName).matches()) continue;
             names.add(entryName);
         }
 
