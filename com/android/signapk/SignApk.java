@@ -23,245 +23,23 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.PrintStream;
-import java.security.DigestOutputStream;
+import java.io.RandomAccessFile;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
-import java.security.MessageDigest;
 import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Map;
-import java.util.TimeZone;
-import java.util.TreeMap;
-import java.util.jar.Attributes;
-import java.util.jar.JarFile;
-import java.util.jar.Manifest;
-import java.util.regex.Pattern;
-
-import kellinwood.zipio.ZioEntry;
-import kellinwood.zipio.ZipInput;
-import kellinwood.zipio.ZipOutput;
 
 /**
- * Command line tool to sign JAR files (including APKs and OTA updates) in
+ * Command line tool to sign OTA updates in
  * a way compatible with the mincrypt verifier, using SHA1 and RSA keys.
  */
 class SignApk {
-    private static final String CERT_SF_NAME = "META-INF/CERT.SF";
-    private static final String CERT_RSA_NAME = "META-INF/CERT.RSA";
 
-    private static final String OTACERT_NAME = "META-INF/com/android/otacert";
-
-    private static boolean verbose = false;
-
-    // Files matching this pattern are not copied to the output.
-    private static Pattern stripPattern =
-        Pattern.compile("^(META-INF/((.*)[.](SF|RSA|DSA|EC)|com/android/otacert))|(" +
-                        Pattern.quote(JarFile.MANIFEST_NAME) + ")$");
-
-    /** Add the SHA1 of every file to the manifest, creating it if necessary. */
-    private static Manifest addDigestsToManifest(ZipInput jar)
-            throws IOException, GeneralSecurityException {
-        Manifest input = null;
-        Map<String, ZioEntry> entries = jar.getEntries();
-        ZioEntry manifestEntry = entries.get(JarFile.MANIFEST_NAME);
-        if (manifestEntry != null) {
-            input = new Manifest();
-            input.read(manifestEntry.getInputStream());
-        }
-        Manifest output = new Manifest();
-        Attributes main = output.getMainAttributes();
-        if (input != null) {
-            main.putAll(input.getMainAttributes());
-        } else {
-            main.putValue("Manifest-Version", "1.0");
-            main.putValue("Created-By", "1.0 (Android SignApk)");
-        }
-
-        MessageDigest md = MessageDigest.getInstance("SHA1");
-        byte[] buffer = new byte[4096];
-        int num;
-
-        // We sort the input entries by name, and add them to the
-        // output manifest in sorted order.  We expect that the output
-        // map will be deterministic.
-
-        TreeMap<String, ZioEntry> byName = new TreeMap<String, ZioEntry>();
-        byName.putAll(entries);
-
-        for (ZioEntry entry: byName.values()) {
-            String name = entry.getName();
-            if (!entry.isDirectory() && !stripPattern.matcher(name).matches()) {
-                InputStream data = entry.getInputStream();
-                while ((num = data.read(buffer)) > 0) {
-                    md.update(buffer, 0, num);
-                }
-
-                Attributes attr = null;
-                if (input != null) attr = input.getAttributes(name);
-                attr = attr != null ? new Attributes(attr) : new Attributes();
-                attr.putValue("SHA1-Digest", Base64.encode(md.digest()));
-                output.getEntries().put(name, attr);
-            }
-        }
-
-        return output;
-    }
-
-    /**
-     * Add a copy of the public key to the archive; this should
-     * exactly match one of the files in
-     * /system/etc/security/otacerts.zip on the device.  (The same
-     * cert can be extracted from the CERT.RSA file but this is much
-     * easier to get at.)
-     */
-    private static void addOtacert(ZipOutput outputJar,
-                                   byte[] publicKey,
-                                   long timestamp)
+    private static void signWholeOutputFile(OutputStream outputStream,
+                                            byte[] sbtbytes,
+                                            Signature signature)
         throws IOException, GeneralSecurityException {
-        ZioEntry je = new ZioEntry(OTACERT_NAME);
-        je.setTime(timestamp);
-        je.getOutputStream().write(publicKey);
-        outputJar.write(je);
-    }
-
-
-    /** Write a .SF file with a digest of the specified manifest. */
-    private static byte[] writeSignatureFile(Manifest manifest, ByteArrayOutputStream out)
-            throws IOException, GeneralSecurityException {
-        Manifest sf = new Manifest();
-        Attributes main = sf.getMainAttributes();
-        main.putValue("Signature-Version", "1.0");
-        main.putValue("Created-By", "1.0 (Android SignApk)");
-
-        MessageDigest md = MessageDigest.getInstance("SHA1");
-        PrintStream print = new PrintStream(
-                new DigestOutputStream(new ByteArrayOutputStream(), md),
-                true, "UTF-8");
-
-        // Digest of the entire manifest
-        manifest.write(print);
-        print.flush();
-        main.putValue("SHA1-Digest-Manifest", Base64.encode(md.digest()));
-
-        Map<String, Attributes> entries = manifest.getEntries();
-        for (Map.Entry<String, Attributes> entry : entries.entrySet()) {
-            // Digest of the manifest stanza for this entry.
-            print.print("Name: " + entry.getKey() + "\r\n");
-            for (Map.Entry<Object, Object> att : entry.getValue().entrySet()) {
-                print.print(att.getKey() + ": " + att.getValue() + "\r\n");
-            }
-            print.print("\r\n");
-            print.flush();
-
-            Attributes sfAttr = new Attributes();
-            sfAttr.putValue("SHA1-Digest", Base64.encode(md.digest()));
-            sf.getEntries().put(entry.getKey(), sfAttr);
-        }
-
-        sf.write(out);
-
-        // A bug in the java.util.jar implementation of Android platforms
-        // up to version 1.6 will cause a spurious IOException to be thrown
-        // if the length of the signature file is a multiple of 1024 bytes.
-        // As a workaround, add an extra CRLF in this case.
-        if ((out.size() % 1024) == 0) {
-            out.write('\r');
-            out.write('\n');
-        }
-        return out.toByteArray();
-    }
-
-    /** Write a .RSA file with a digital signature. */
-    private static void writeSignatureBlock(
-            Signature signature, byte[] sbt, OutputStream out)
-            throws IOException, GeneralSecurityException {
-        out.write(sbt);
-        out.write(signature.sign());
-    }
-
-    private static class WholeFileSignerOutputStream extends OutputStream {
-        private boolean closing = false;
-        private ByteArrayOutputStream footer = new ByteArrayOutputStream();
-        private OutputStream out;
-        private Signature sig;
-
-        public WholeFileSignerOutputStream(OutputStream out, Signature sig) {
-            this.out = out;
-            this.sig = sig;
-        }
-
-        public void notifyClosing() {
-            closing = true;
-        }
-
-        public void finish() throws IOException {
-            closing = false;
-
-            byte[] data = footer.toByteArray();
-            if (data.length < 2)
-                throw new IOException("Less than two bytes written to footer");
-            write(data, 0, data.length - 2);
-        }
-
-        public byte[] getTail() {
-            return footer.toByteArray();
-        }
-
-        @Override
-        public void write(byte[] b) throws IOException {
-            write(b, 0, b.length);
-        }
-
-        @Override
-        public void write(byte[] b, int off, int len) throws IOException {
-            // if the jar is about to close, save the footer that will be written
-            if (closing) {
-                footer.write(b, off, len);
-            } else {
-                try {
-                    sig.update(b, off, len);
-                } catch (GeneralSecurityException e) {
-                    throw new IOException("SignatureException: " + e);
-                }
-                out.write(b, off, len);
-            }
-        }
-
-        @Override
-        public void write(int b) throws IOException {
-            // if the jar is about to close, save the footer that will be written
-            if (closing) {
-                footer.write(b);
-            } else {
-                try {
-                    sig.update((byte) b);
-                } catch (GeneralSecurityException e) {
-                    throw new IOException("SignatureException: " + e);
-                }
-                out.write(b);
-            }
-        }
-    }
-
-    private static void signWholeOutputFile(byte[] zipData,
-                                            OutputStream outputStream,
-                                            Signature signature,
-                                            byte[] sbtbytes)
-        throws IOException, GeneralSecurityException {
-
-        // For a zip with no archive comment, the
-        // end-of-central-directory record will be 22 bytes long, so
-        // we expect to find the EOCD marker 22 bytes from the end.
-        if (zipData[zipData.length-22] != 0x50 ||
-            zipData[zipData.length-21] != 0x4b ||
-            zipData[zipData.length-20] != 0x05 ||
-            zipData[zipData.length-19] != 0x06) {
-            throw new IllegalArgumentException("zip data already has an archive comment");
-        }
 
         ByteArrayOutputStream temp = new ByteArrayOutputStream();
 
@@ -272,7 +50,8 @@ class SignApk {
         byte[] message = "signed by SignApk".getBytes("UTF-8");
         temp.write(message);
         temp.write(0);
-        writeSignatureBlock(signature, sbtbytes, temp);
+        temp.write(sbtbytes);
+        temp.write(signature.sign());
         int total_size = temp.size() + 6;
         if (total_size > 0xffff) {
             throw new IllegalArgumentException("signature is too big for ZIP file comment");
@@ -311,34 +90,6 @@ class SignApk {
         temp.writeTo(outputStream);
     }
 
-    /**
-     * Copy all the files in a manifest from input to output.  We set
-     * the modification times in the output to a fixed time, so as to
-     * reduce variation in the output file and make incremental OTAs
-     * more efficient.
-     */
-    private static void copyFiles(ZipInput in, ZipOutput out, long timestamp)
-            throws IOException  {
-        Map<String, ZioEntry> e = in.getEntries();
-        ArrayList<String> names = new ArrayList<String>();
-        for (ZioEntry entry : e.values()) {
-            if (entry.isDirectory()) continue;
-            String entryName = entry.getName();
-            if (stripPattern.matcher(entryName).matches()) continue;
-            names.add(entryName);
-        }
-
-        Collections.sort(names);
-        Map<String, ZioEntry> input = in.getEntries();
-        for (String name : names) {
-            if (verbose) System.out.println(name);
-            if (name.equals(OTACERT_NAME)) continue;
-            ZioEntry inEntry = input.get(name);
-            inEntry.setTime(timestamp);
-            out.write(inEntry);
-        }
-    }
-
     private static byte[] toByteArray(InputStream in) throws IOException {
         ByteArrayOutputStream result = new ByteArrayOutputStream();
         byte[] buf = new byte[4096];
@@ -349,113 +100,53 @@ class SignApk {
     }
 
     public static void main(String[] args) {
-        if (args.length != 2 && args.length != 3 && args.length != 4) {
-            System.err.println("Usage: signapk [-v] [-w] " +
-                    "input.jar output.jar");
+        if (args.length != 2) {
+            System.err.println("Usage: signapk input.jar output.jar");
             System.exit(2);
         }
 
-        boolean signWholeFile = false;
-        String signingKey = "platform";
-        boolean align = true;
-        int argstart = 0;
-        if (args[0].equals("-w") || args[1].equals("-w")) {
-            signWholeFile = true;
-            signingKey = "testkey";
-            align = false;
-            argstart = 1;
-        }
-        if (args[0].equals("-v") || args[1].equals("-v")) {
-            verbose = true;
-            argstart = 1;
-        }
-        if (signWholeFile && verbose) {
-            argstart = 2;
-        }
-        if (verbose) {
-            System.out.println("Starting Signer file : [ " + args[argstart+2] + " ] ...");
-            System.out.println("Please wait a minute ...");
-        }
-
-        ZipInput inputJar = null;
-        ZipOutput outputJar = null;
+        RandomAccessFile inputFile = null;
         FileOutputStream outputFile = null;
 
         try {
+            inputFile = new RandomAccessFile(args[0], "r");
 
-            // Set all ZIP file timestamps to Jan 1 2009 00:00:00.
-            long timestamp = 1230768000000L;
-            // The Java ZipEntry API we're using converts milliseconds since epoch into MS-DOS
-            // timestamp using the current timezone. We thus adjust the milliseconds since epoch
-            // value to end up with MS-DOS timestamp of Jan 1 2009 00:00:00.
-            timestamp -= TimeZone.getDefault().getOffset(timestamp);
+            // For a zip with no archive comment, the
+            // end-of-central-directory record will be 22 bytes long, so
+            // we expect to find the EOCD marker 22 bytes from the end.
+            byte[] tail = new byte[22];
+            inputFile.seek(inputFile.length() - 22);
+            inputFile.readFully(tail);
+            if (tail[0] != 0x50 || tail[1] != 0x4b || tail[2] != 0x05 || tail[3] != 0x06) {
+                throw new IllegalArgumentException("zip data already has an archive comment");
+            }
 
-            byte[] pk8bytes = toByteArray(SignApk.class.getResourceAsStream("/keys/" + signingKey + ".pk8"));
+            byte[] pk8bytes = toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.pk8"));
             KeyFactory kf = KeyFactory.getInstance("RSA");
             PrivateKey privateKey = kf.generatePrivate(new PKCS8EncodedKeySpec(pk8bytes));
-            inputJar = ZipInput.read(args[argstart+0], align);
+            outputFile = new FileOutputStream(args[1]);
 
-            outputFile = new FileOutputStream(args[argstart+1]);
-            if (signWholeFile) {
-                if (verbose) System.out.println(" Signing Whole File");
-                Signature wfsig = Signature.getInstance("SHA1withRSA");
-                wfsig.initSign(privateKey);
-            	WholeFileSignerOutputStream wfsos = new WholeFileSignerOutputStream(outputFile, wfsig);
-                outputJar = new ZipOutput(wfsos);
+            Signature wfsig = Signature.getInstance("SHA1withRSA");
+            wfsig.initSign(privateKey);
 
-                addOtacert(outputJar, toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.x509.pem")), timestamp);
-                copyFiles(inputJar, outputJar, timestamp);
+            int read;
+            inputFile.seek(0);
+            byte[] buffer = new byte[4096];
+            long len = inputFile.length() - 2;
+            while ((read = inputFile.read(buffer, 0, len < buffer.length ? (int) len : buffer.length)) > 0) {
+                outputFile.write(buffer, 0, read);
+                wfsig.update(buffer, 0, read);
+                len -= read;
+            }
 
-                wfsos.notifyClosing();
-                outputJar.close();
-                wfsos.finish();
-                outputJar = null;
-                outputFile.flush();
-
-                signWholeOutputFile(wfsos.getTail(), outputFile, wfsig, toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.sbt")));
-                System.exit(0);
-            } 
-            outputJar = new ZipOutput(outputFile);
-
-            ZioEntry je;
-
-            Manifest manifest = addDigestsToManifest(inputJar);
-
-            // MANIFEST.MF
-            je = new ZioEntry(JarFile.MANIFEST_NAME);
-            je.setTime(timestamp);
-            manifest.write(je.getOutputStream());
-            outputJar.write(je);
-
-            // CERT.SF
-            Signature signature = Signature.getInstance("SHA1withRSA");
-            signature.initSign(privateKey);
-            je = new ZioEntry(CERT_SF_NAME);
-            je.setTime(timestamp);
-            byte[] sfBytes = writeSignatureFile(manifest, new ByteArrayOutputStream());
-            je.getOutputStream().write(sfBytes);
-            outputJar.write(je);
-            signature.update(sfBytes);
-
-            // CERT.RSA
-            je = new ZioEntry(CERT_RSA_NAME);
-            je.setTime(timestamp);
-            byte[] sbtbytes = toByteArray(SignApk.class.getResourceAsStream("/keys/platform.sbt"));
-            writeSignatureBlock(signature, sbtbytes, je.getOutputStream());
-            outputJar.write(je);
-
-            // Everything else
-            copyFiles(inputJar, outputJar, timestamp);
-
-            outputJar.close();
-            outputJar = null;
-            outputFile.flush();
+            byte[] sbtbytes = toByteArray(SignApk.class.getResourceAsStream("/keys/testkey.sbt"));
+            signWholeOutputFile(outputFile, sbtbytes, wfsig);
         } catch (Exception e) {
             e.printStackTrace();
             System.exit(1);
         } finally {
             try {
-                if (inputJar != null) inputJar.close();
+                if (inputFile != null) inputFile.close();
                 if (outputFile != null) outputFile.close();
             } catch (IOException e) {
                 e.printStackTrace();
