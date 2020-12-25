@@ -4,7 +4,7 @@ SignAPK for working in Android without any dependencies. (Only testkey)
 
 **Another simple signapk mod!**  
 
-I have modified SignApk.java from https://android.googlesource.com/platform/build/+/e691373514d47ecf29ce13e14e9f3b867d394693/tools/signapk for running in android too.
+I have modified SignApk.java from https://android.googlesource.com/platform/build/+/badd2ca451ee7a408f55632025cbe69649b426b5/tools/signapk/ for running in android too.
 
 ### Description:
 
