@@ -22,4 +22,7 @@ Download **_MinSignApk.jar_** from [releases](https://github.com/HemanthJabalpur
 `java -jar MinSignApk.jar in.zip out.zip`  
 
 **In Android**  
-`dalvikvm -cp MinSignApk.jar com.android.signapk.SignApk in.zip out.zip`
+`dalvikvm -cp MinSignApk.jar com.android.signapk.SignApk in.zip out.zip`  
+
+Note: If you want to use Shell script, then see README.md in `shell` folder of this repo
+
