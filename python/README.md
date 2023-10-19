@@ -1,6 +1,6 @@
 ### Prerequisites
 - Install `python3` if not installed
-- Download SingApk.py
+- Download SignApk.py
 - Install PyCryptodome module using `pip install pycryptodome`
 
 ### Usage

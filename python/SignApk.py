@@ -44,7 +44,7 @@ def wite_comment(of, h):
     of.write(hex2bin('b806ffffca06'))
 
 
-def hash_update(f, of, fsize):
+def copy_and_hash(f, of, fsize):
     h = SHA1.new()
     bufsize = 64 * 1024
     tempsize = fsize - 2
@@ -72,7 +72,7 @@ def sign(inf, outf):
     with open(args.infile, 'rb') as f:
         check_comment(f, fsize)
         with open(args.outfile, 'wb') as of:
-            h = hash_update(f, of, fsize)
+            h = copy_and_hash(f, of, fsize)
             wite_comment(of, h)
 
 
