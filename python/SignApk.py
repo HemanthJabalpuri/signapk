@@ -2,7 +2,7 @@
 
 # Sign zip files with testkey for flashing in Android recovery
 # this is a Python port of Java source
-# depends on Python 3.6+ and `pycryptodome` module
+# depends on Python 3.5.3+ and `pycryptodome` module
 #
 # Author : HemanthJabalpuri
 # Date   : 19th October 2023
@@ -23,8 +23,8 @@ except ImportError:
     abort('\nInstall PyCryptodome module using "pip install pycryptodome"\n')
 
 
-def hex2bin(hex):
-    return binascii.unhexlify(hex)
+def hex2bin(hex_str):
+    return binascii.unhexlify(hex_str)
 
 
 def wite_comment(of, h):
@@ -69,17 +69,16 @@ def check_comment(f, fsize):
 def sign(inf, outf):
     fsize = os.stat(inf).st_size
 
-    with open(args.infile, 'rb') as f:
+    with open(inf, 'rb') as f:
         check_comment(f, fsize)
-        with open(args.outfile, 'wb') as of:
+        with open(outf, 'wb') as of:
             h = copy_and_hash(f, of, fsize)
             wite_comment(of, h)
 
 
 if __name__ == '__main__':
-    if not sys.version_info >= (3, 6):
-        # May run in any Python3, but didn't tested
-        abort('Requires Python 3.6+')
+    if not sys.version_info >= (3, 5, 3):
+        abort('Requires Python 3.5.3+')
     parser = argparse.ArgumentParser()
     parser.add_argument('infile', help='input zip file path to sign')
     parser.add_argument('outfile', help='output zip file path to store signed file')

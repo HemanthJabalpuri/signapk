@@ -1,7 +1,7 @@
 ### Prerequisites
-- Install `python3` if not installed
-- Download SignApk.py
+- Install `python3` (3.5.3+)
 - Install PyCryptodome module using `pip install pycryptodome`
+- Download SignApk.py
 
 ### Usage
 ```python
